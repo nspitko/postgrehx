@@ -13,10 +13,20 @@ typedef Int32 = Int;
 class Messages {
 	public static function writeMessage(s: Socket, f: ClientMessageType): Void {
 		var w = new Writer();
-		var buffer = switch(f){
+		switch(f){
 			case StartupMessage(args): w.msgLength().addInt32(0x30000).addObj(args);
 			case PasswordMessage(s): w.addString('p').msgLength().addCString(s);
 			case Query(query): w.addString("Q").msgLength().addCString(query);
+			case SASLInitialResponse(type, initial_value):
+				trace(type);
+				w.addString('p').msgLength().addCString(type);
+				if( initial_value == null )
+					w.addInt32(-1);
+				else 
+					w.addInt32( initial_value.length ).addString(initial_value);
+			case SASLResponse(msg): w.addString("p").msgLength().addString(msg); // Length determined by msg size, not null ter.
+
+					
 		}
 		var writer_bytes = w.getBytes();
 		s.output.writeBytes(writer_bytes, 0, writer_bytes.length);
@@ -30,16 +40,20 @@ class Messages {
 		return switch(code){
 			case "R" : {
 				var code = input.readInt32();
-				var type = switch(code){
-					case 0 : AuthenticationOk;
-					case 2 : AuthenticationKerberosV5;
-					case 3 : AuthenticationCleartextPassword;
-					case 5 : AuthenticationMD5Password(input.readString(4));
+				var type: AuthenticationRequestType;
+				switch(code){
+					case 0 : type = AuthenticationOk;
+					case 2 : type = AuthenticationKerberosV5;
+					case 3 : type = AuthenticationCleartextPassword;
+					case 5 : type = AuthenticationMD5Password(input.readString(4));
 					// case 6 : AuthenticationSCMCredential;
 					// case 7 : AuthenticationGSS;
 					// case 9 : AuthenticationSSPI;
 					// case 8 : AuthenticationGSSContinue(input.readString(length));
-					case _ : AuthenticationUnknown;
+					case 10 : type = AuthenticationSASL(input.readUntil(0)); input.readByte(); // cstr, so read the null term since readUntil will not
+					case 11 : type = AuthenticationSASLContinue(input.readString(length-4)); // payload length is the remaining message len
+					case 12 : type = AuthenticationSASLFinal(input.readString(length-4)); // payload length is the remaining message len
+					case _ : type = AuthenticationUnknown;
 				}
 				AuthenticationRequest(type);
 			}
@@ -120,6 +134,7 @@ class Messages {
 							}
 					]
 			);
+			case "X" : Terminate;
 			case  _  : Unknown(code);
 		}
 	}
@@ -179,6 +194,9 @@ enum AuthenticationRequestType{
 	AuthenticationGSS;
 	AuthenticationSSPI;
 	AuthenticationGSSContinue(auth_data: String);
+	AuthenticationSASL(auth_data: String);
+	AuthenticationSASLContinue(auth_data: String);
+	AuthenticationSASLFinal(auth_data: String);
 	AuthenticationUnknown;
 }
 
@@ -212,6 +230,11 @@ enum ServerMessage {
 	// PortalSuspended;
 	ReadyForQuery(status: String);
 	RowDescription(fields: Array<FieldDescription>);
+
+	// X
+	Terminate();
+	
+	// Other
 	Unknown(code: String);
 }
 
@@ -243,6 +266,8 @@ typedef ConnectionArgs ={
 enum ClientMessageType{
 	StartupMessage(args: StartupArgs);
 	PasswordMessage(s: String);
+	SASLInitialResponse(type: String, initial_value: String);
+	SASLResponse(msg: String);
 	// Bind;
 	// CancelRequest;
 	// Close;

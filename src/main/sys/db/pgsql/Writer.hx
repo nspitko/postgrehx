@@ -16,6 +16,10 @@ class Writer {
 	}
 
 	public function addInt32(number: Int){
+		// @todo this looks... kinda insane?
+		// I assume this is correcting to javascript bullshit??
+		// Disabling it for now
+/*
 		var unsigned = (number < 0) ? (number + 0xffffff) : number;
 		bb.addByte(Math.floor(unsigned / 0xffffff));
 		unsigned &= 0xffffff;
@@ -24,6 +28,12 @@ class Writer {
 		bb.addByte(Math.floor(unsigned / 0xff));
 		unsigned &= 0xff;
 		bb.addByte(Math.floor(unsigned));
+		*/
+
+		bb.addByte((number >> 24) & 0xFF);
+		bb.addByte((number >> 16) & 0xFF);
+		bb.addByte((number >> 8) & 0xFF);
+		bb.addByte(number & 0xFF);
 		pos += 4;
 		return this;
 	}
@@ -89,10 +99,24 @@ class Writer {
 	}
 
 	public function getBytes():Bytes{
-		var bytes = bb.getBytes();
-		if (length_marker != -1){
-			bytes.setInt32(length_marker, bytes.length - length_marker);
+		if (length_marker != -1)
+		{
+			var len = bb.length - length_marker;
+			@:privateAccess
+			{
+				// This is a gross hack, should just add a proper "setInt32" big endian func
+				var oldPos = bb.pos;
+				bb.pos = length_marker;
+				addInt32(len);
+				bb.pos = oldPos;
+			}
+			
 		}
+
+		var bytes = bb.getBytes();
+		//if (length_marker != -1){
+		//	bytes.setInt32(length_marker, bytes.length - length_marker);
+		//}
 		return bytes;
 		
 	}

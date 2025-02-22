@@ -1,5 +1,8 @@
 package sys.db;
 
+import haxe.crypto.Sha256;
+import haxe.crypto.Hmac;
+import haxe.crypto.Base64;
 import haxe.io.Bytes;
 import haxe.io.BytesBuffer;
 import haxe.io.BytesInput;
@@ -38,6 +41,14 @@ class PostgresConnection implements sys.db.Connection {
 	var current_complete_iterator : Iterator<CommandComplete>;
 	var current_message           : ServerMessage;
 
+	var sasl_client_first_message: 	String;
+	var sasl_server_first_message: 	String;
+
+	var sasl_auth_message:			String;
+	var sasl_salted_password:		haxe.io.Bytes;
+
+	var auth_mode			: String = null;
+
 	public function new( params : {
 		database : String,
 		host     : String,
@@ -50,10 +61,9 @@ class PostgresConnection implements sys.db.Connection {
 		status = new Map();
 		socket = new Socket();
 		socket.input.bigEndian = true;
-		socket.output.bigEndian = true;
+		//socket.output.bigEndian = true;
 		var h = new Host(params.host);
 		socket.connect(h, params.port);
-
 		// this is the current data row iterator for the result.
 		current_data_iterator = [].iterator();
 
@@ -84,6 +94,56 @@ class PostgresConnection implements sys.db.Connection {
 								user : params.user,
 								salt : salt
 							})));
+						case AuthenticationSASL(auth_data) :
+							// @todo: Handle case where we're offered multiple SASL modes.
+							auth_mode = auth_data;
+							var nonce = "todo";
+
+							sasl_client_first_message = 'n,,n=${params.user},r=${nonce}';
+							writeMessage(SASLInitialResponse( auth_data, sasl_client_first_message )); 
+						
+						case AuthenticationSASLContinue(msg):
+							var c = new haxe.crypto.Pbkdf2();
+							c.init( SHA256 );
+
+							sasl_server_first_message = msg;
+							var re = ~/r=([^,]+),s=([^,]+),i=([0-9]+)/;
+							re.match(msg);
+							var r = re.matched(1);
+	
+							var sasl_salt = Base64.decode( re.matched(2) );
+							var sasl_iterations = Std.parseInt( re.matched(3) );
+
+							var response = 'c=biws,r=${r}';
+
+							sasl_auth_message = '${sasl_client_first_message.substring(3)},$sasl_server_first_message,$response';
+
+							//var salted_password = PBKDF2.deriveKey(params.pass, sasl_salt.toString(), Std.parseInt( sasl_iterations ), 32);
+							sasl_salted_password =  c.encode( Bytes.ofString( params.pass ), sasl_salt, sasl_iterations, 32);
+
+							var sasl_client_key = new Hmac(SHA256).make( sasl_salted_password , haxe.io.Bytes.ofString("Client Key", UTF8));
+							var sasl_stored_key = Sha256.make(sasl_client_key );
+							var sasl_client_signature = new Hmac(SHA256).make(  sasl_stored_key , haxe.io.Bytes.ofString(sasl_auth_message, UTF8));
+
+							var len = sasl_client_key.length;
+							var sasl_client_proof =  haxe.io.Bytes.alloc( len );
+							for( i in 0 ... len )
+								sasl_client_proof.set(i, sasl_client_key.get(i) ^ sasl_client_signature.get(i) );
+
+							writeMessage( SASLResponse( '$response,p=${Base64.encode( sasl_client_proof )}' ) );
+
+						case AuthenticationSASLFinal(msg): 
+							trace(msg);
+							var re = ~/v=([^,]+)/;
+							re.match(msg);
+							var v = re.matched(1);
+							
+							var server_key = new Hmac(SHA256).make( sasl_salted_password, Bytes.ofString( "Server Key" ) );
+							var verifier = new Hmac(SHA256).make( server_key, Bytes.ofString( sasl_auth_message ) ); 
+
+							if( Base64.encode( verifier ) != v )
+								throw ('SASL authentication error: Server failed verification');
+
 						case ni: throw ('Unimplemented: $ni');
 					}
 				}
@@ -93,6 +153,7 @@ class PostgresConnection implements sys.db.Connection {
 					secret_key = args.secret_key;
 				}
 				case ReadyForQuery(status) :  break;  // move on when ready
+				case Unknown(code): throw ('Unimplemented: $code');
 				case ni: throw ('Unimplemented: $ni');
 			}
 		}
@@ -259,9 +320,9 @@ class PostgresConnection implements sys.db.Connection {
 	}
 
 	public function addValue( s : StringBuf, v : Dynamic ) : Void {
-		if (v == null || Std.is(v,Int)){
+		if (v == null || Std.isOfType(v,Int)){
 			s.add(v);
-		} else if (Std.is(v,Bool)){
+		} else if (Std.isOfType(v,Bool)){
 			s.add(if (cast v) "TRUE" else "FALSE");
 		} else {
 			s.add(quote(Std.string(v)));
@@ -330,14 +391,14 @@ class PostgresResultSet implements ResultSet {
 	var cached_rows        : Array<Array<Bytes>>;
 
 	var row_count                  = 0;
-	var set_length  : Int    = 0;
+	var set_length  : Int    = -1;
 	var current_row : Array<Bytes> = null;
 
 	public var length(get, null)  : Int;
 	public var nfields(get, null) : Int;
 
 	function get_length(){
-	    if (set_length == null){
+	    if (set_length == -1){
             cached_rows   = [for(row in data_iterator) row];
             set_length    = cached_rows.length + row_count;
             data_iterator = cached_rows.iterator();
@@ -347,7 +408,7 @@ class PostgresResultSet implements ResultSet {
 
 	function get_nfields() return field_descriptions.length;
 
-	public function new(?field_descriptions, ?data_iterator){
+	public function new(?field_descriptions, ?data_iterator: Iterator<Array<Bytes>>){
 	    if (field_descriptions == null) field_descriptions = [];
 	    if (data_iterator == null) data_iterator = [].iterator();
 
@@ -372,7 +433,7 @@ class PostgresResultSet implements ResultSet {
 	    if (bytes != null)
             return Std.parseFloat(bytes.toString());
         else
-            return null;
+            return 0;
 	}
 
 	public function	getIntResult(col_idx: Int) : Int{
@@ -380,7 +441,7 @@ class PostgresResultSet implements ResultSet {
 	    if (bytes != null)
             return cast Std.parseInt(bytes.toString());
         else
-            return null;
+            return 0;
 	}
 
 	public function getResult(col_idx: Int) : String {

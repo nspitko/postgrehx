@@ -133,7 +133,6 @@ class PostgresConnection implements sys.db.Connection {
 							writeMessage( SASLResponse( '$response,p=${Base64.encode( sasl_client_proof )}' ) );
 
 						case AuthenticationSASLFinal(msg): 
-							trace(msg);
 							var re = ~/v=([^,]+)/;
 							re.match(msg);
 							var v = re.matched(1);

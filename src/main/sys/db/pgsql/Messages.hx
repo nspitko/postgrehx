@@ -18,7 +18,6 @@ class Messages {
 			case PasswordMessage(s): w.addString('p').msgLength().addCString(s);
 			case Query(query): w.addString("Q").msgLength().addCString(query);
 			case SASLInitialResponse(type, initial_value):
-				trace(type);
 				w.addString('p').msgLength().addCString(type);
 				if( initial_value == null )
 					w.addInt32(-1);

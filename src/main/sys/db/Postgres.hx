@@ -282,6 +282,8 @@ class PostgresConnection implements sys.db.Connection {
 	}
 
 	public function handleError(notice){
+		throw(notice.message);
+		// Further processing is just going to EOF here, why are we doing this?
 		while(true){
 			switch(socket.readMessage()){
 				case ReadyForQuery(status) : break;
